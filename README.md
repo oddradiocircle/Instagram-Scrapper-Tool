@@ -1,75 +1,79 @@
-# Instagram-Scrapper-Tool
-Instagram-Scrapper-Tool is a powerful and modern GUI-based application for scraping publicly available data from Instagram profiles. Designed for researchers, analysts, and developers, this tool leverages Instagram's public GraphQL endpoints to extract detailed profile, post, and connection information with speed and reliability.
+# Instagram Scraper Tool 🔍
 
-## 🚀 Features
-🔍 Profile Information Scraping
-Username, full name, and bio
+A professional Instagram data scraping tool that extracts public profile information, posts, followers, and following data with a sleek graphical interface.
 
-High-resolution profile picture URL
+## Features ✨
+Profile Information: Extract username, bio, follower counts, verification status, and more
 
-Follower and following counts
+Post Analytics: Get post URLs, like counts, comments, and captions
 
-Verification status
+Network Data: Scrape followers and following lists (public accounts only)
 
-External website URL
+Beautiful GUI: Modern purple/black themed interface with real-time logging
 
-## 🖼️ Post Scraping
-Unique post shortcodes (IDs)
+Export Options: Save scraped data to JSON files
 
-Image and video URLs
+Smart Scraping: Uses Instagram's GraphQL endpoints for efficient data collection
 
-Like and comment counts
+## Installation 🛠️
+Clone the repository:
 
-Timestamps
+bash
+git clone https://github.com/Threadlinee/Instagram-Scrapper-Tool.git
+cd Instagram-Scraper-Tool
+Install required dependencies:
 
-Captions
+pip install -r requirements.txt
+Usage 🚀
 
-## 👥 Follower/Following Scraping
-Usernames of followers/following
+python instagram_scraper.py
+Enter the Instagram username you want to scrape
 
-Display names
+Select what data to collect (posts, followers, following)
 
-Profile picture URLs
+Set maximum items to collect
 
-## 🖥️ GUI Features
-Sleek modern interface (purple/black theme)
+Click "SCRAPE PROFILE" to begin
 
-Real-time scraping logs
+View real-time results in the log window
 
-Start/Stop scraping at any time
+Data is automatically saved to JSON (optional)
 
-Selective data scraping (choose what to collect)
+## Screenshot 📸
+https://screenshot.png
 
-Export results in structured JSON format
+Technical Details ⚙️
+Backend: Python 3.8+
 
-## ⚙️ Technical Highlights
-Utilizes Instagram’s public GraphQL endpoints
+GUI Framework: Tkinter
 
-Multi-threaded architecture for enhanced speed
+Scraping Method: Instagram GraphQL API
 
-Robust session and error handling
+Data Format: JSON
 
-Designed for efficiency and stability during long scraping sessions
+Multi-threading: Yes (for efficient scraping)
 
-# ⚠️ Important Notes
-Works only with public Instagram profiles
+## Legal Disclaimer ⚖️
+This tool is for educational purposes only. Use it responsibly and in compliance with:
 
-Private profiles are not accessible without authentication
+Instagram's Terms of Service
 
-Excessive requests may trigger Instagram rate limits or blocks
+Local laws and regulations
 
-Always use this tool ethically and legally
+Privacy rights of others
 
-Complies with Instagram’s Terms of Service – for educational and research use only
+The developer assumes no liability for misuse of this tool.
 
-## 📁 Use Cases
-Open-source intelligence (OSINT)
+# Contributing 🤝
+Contributions are welcome! Please open an issue or pull request for:
 
-Social media analytics
+Bug fixes
 
-Market research
+New features
 
-Academic studies
+Documentation improvements
 
-## 📌 Disclaimer
-This tool is intended for lawful use only. The developer is not responsible for any misuse. Please ensure you comply with all applicable data and privacy laws in your jurisdiction.
+Performance optimizations
+
+# License 📜
+MIT License - See LICENSE file for details
