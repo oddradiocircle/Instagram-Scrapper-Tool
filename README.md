@@ -39,9 +39,6 @@ View real-time results in the log window
 
 Data is automatically saved to JSON (optional)
 
-## Screenshot 📸
-https://screenshot.png
-
 Technical Details ⚙️
 Backend: Python 3.8+
 
