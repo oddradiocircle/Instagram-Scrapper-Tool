@@ -5,12 +5,21 @@ from tkinter import scrolledtext, ttk
 import threading
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 from urllib.parse import urljoin
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Accept-Language': 'en-US,en;q=0.9'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'DNT': '1',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1'
 }
 
 class InstagramScraper:
@@ -18,42 +27,62 @@ class InstagramScraper:
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
         self.stop_event = threading.Event()
+        self.request_delay = 2 
 
-    def get_profile_info(self, username, gui_logger=None):
+    def make_request(self, url, gui_logger=None):
         if self.stop_event.is_set():
             return None
             
-        url = f"https://www.instagram.com/{username}/"
         try:
-            if gui_logger:
-                gui_logger(f"[+] Fetching profile: {username}")
-                
+            time.sleep(self.request_delay) 
             response = self.session.get(url, timeout=10)
-            if response.status_code == 404:
-                if gui_logger:
-                    gui_logger(f"[!] Profile not found: {username}")
-                return None
-            response.raise_for_status()
-
-            soup = BeautifulSoup(response.text, 'html.parser')
-            script_tags = soup.find_all('script', type='text/javascript')
             
-            for script in script_tags:
-                if 'window._sharedData' in script.text:
+            if response.status_code == 200:
+                if 'login' in response.url.lower():
+                    if gui_logger:
+                        gui_logger("[!] Instagram is requiring login (got redirected to login page)")
+                    return None
+                return response.text
+            elif response.status_code == 429:
+                if gui_logger:
+                    gui_logger("[!] Rate limited - try again later or use proxies")
+                return None
+            else:
+                if gui_logger:
+                    gui_logger(f"[!] HTTP {response.status_code} error")
+                return None
+                
+        except Exception as e:
+            if gui_logger:
+                gui_logger(f"[!] Request error: {str(e)}")
+            return None
+
+    def get_profile_info(self, username, gui_logger=None):
+        url = f"https://www.instagram.com/{username}/"
+        html = self.make_request(url, gui_logger)
+        if not html:
+            return None
+            
+        soup = BeautifulSoup(html, 'html.parser')
+        script_tags = soup.find_all('script', type='text/javascript')
+        
+        for script in script_tags:
+            if 'window._sharedData' in script.text:
+                try:
                     json_str = script.text.split('window._sharedData = ')[1].rstrip(';')
                     data = json.loads(json_str)
                     profile_data = data['entry_data']['ProfilePage'][0]['graphql']['user']
                     return profile_data
+                except Exception as e:
+                    if gui_logger:
+                        gui_logger(f"[!] Error parsing profile data: {str(e)}")
+                    return None
                     
-        except Exception as e:
-            if gui_logger:
-                gui_logger(f"[!] Error fetching profile {username}: {str(e)}")
-            return None
+        if gui_logger:
+            gui_logger("[!] Could not find profile data in page source")
+        return None
 
     def get_posts(self, username, count=12, gui_logger=None):
-        if self.stop_event.is_set():
-            return []
-            
         profile_data = self.get_profile_info(username, gui_logger)
         if not profile_data:
             return []
@@ -81,106 +110,6 @@ class InstagramScraper:
                 
         return posts
 
-    def get_followers(self, username, count=20, gui_logger=None):
-        if self.stop_event.is_set():
-            return []
-            
-        profile_data = self.get_profile_info(username, gui_logger)
-        if not profile_data:
-            return []
-            
-        user_id = profile_data['id']
-        followers = []
-        end_cursor = None
-        has_next_page = True
-        
-        while has_next_page and len(followers) < count and not self.stop_event.is_set():
-            variables = {
-                "id": user_id,
-                "first": 50,
-                "after": end_cursor
-            }
-            
-            url = "https://www.instagram.com/graphql/query/?query_hash=c76146de99bb02f6415203be841dd25a&variables=" + json.dumps(variables)
-            
-            try:
-                response = self.session.get(url, timeout=10)
-                response.raise_for_status()
-                data = response.json()
-                
-                edges = data['data']['user']['edge_followed_by']['edges']
-                for edge in edges:
-                    if len(followers) >= count:
-                        break
-                    follower = edge['node']
-                    followers.append({
-                        'username': follower['username'],
-                        'full_name': follower['full_name'],
-                        'profile_pic': follower['profile_pic_url']
-                    })
-                    if gui_logger:
-                        gui_logger(f"[+] Found follower: {follower['username']}")
-                
-                has_next_page = data['data']['user']['edge_followed_by']['page_info']['has_next_page']
-                end_cursor = data['data']['user']['edge_followed_by']['page_info']['end_cursor']
-                
-            except Exception as e:
-                if gui_logger:
-                    gui_logger(f"[!] Error fetching followers: {str(e)}")
-                break
-                
-        return followers[:count]
-
-    def get_following(self, username, count=20, gui_logger=None):
-        if self.stop_event.is_set():
-            return []
-            
-        profile_data = self.get_profile_info(username, gui_logger)
-        if not profile_data:
-            return []
-            
-        user_id = profile_data['id']
-        following = []
-        end_cursor = None
-        has_next_page = True
-        
-        while has_next_page and len(following) < count and not self.stop_event.is_set():
-            variables = {
-                "id": user_id,
-                "first": 50,
-                "after": end_cursor
-            }
-            
-            url = "https://www.instagram.com/graphql/query/?query_hash=d04b0a864b4b54837c0d870b0e77e076&variables=" + json.dumps(variables)
-            
-            try:
-                response = self.session.get(url, timeout=10)
-                response.raise_for_status()
-                data = response.json()
-                
-                edges = data['data']['user']['edge_follow']['edges']
-                for edge in edges:
-                    if len(following) >= count:
-                        break
-                    follow = edge['node']
-                    following.append({
-                        'username': follow['username'],
-                        'full_name': follow['full_name'],
-                        'profile_pic': follow['profile_pic_url']
-                    })
-                    if gui_logger:
-                        gui_logger(f"[+] Found following: {follow['username']}")
-                
-                has_next_page = data['data']['user']['edge_follow']['page_info']['has_next_page']
-                end_cursor = data['data']['user']['edge_follow']['page_info']['end_cursor']
-                
-            except Exception as e:
-                if gui_logger:
-                    gui_logger(f"[!] Error fetching following: {str(e)}")
-                break
-                
-        return following[:count]
-
     def stop(self):
         self.stop_event.set()
 
@@ -196,26 +125,26 @@ class InstagramScraperApp:
         style.theme_use('clam')
 
         style.configure("TButton",
-                        font=("Consolas", 12, "bold"),
-                        foreground="#FF00AA",
-                        background="#111122",
-                        borderwidth=0,
-                        padding=8)
+                      font=("Consolas", 12, "bold"),
+                      foreground="#FF00AA",
+                      background="#111122",
+                      borderwidth=0,
+                      padding=8)
         style.map("TButton",
-                  foreground=[('active', '#FF00FF')],
-                  background=[('active', '#220022')])
+                foreground=[('active', '#FF00FF')],
+                background=[('active', '#220022')])
 
         style.configure("TEntry",
-                        fieldbackground="#111122",
-                        foreground="#FF00AA",
-                        font=("Consolas", 12),
-                        bordercolor="#FF00AA",
-                        borderwidth=2,
-                        padding=5)
+                      fieldbackground="#111122",
+                      foreground="#FF00AA",
+                      font=("Consolas", 12),
+                      bordercolor="#FF00AA",
+                      borderwidth=2,
+                      padding=5)
 
         title = tk.Label(root, text="⚡ Instagram Scraper Tool ⚡",
-                         font=("Consolas", 24, "bold"),
-                         fg="#FF00AA", bg="#0f0f1e")
+                        font=("Consolas", 24, "bold"),
+                        fg="#FF00AA", bg="#0f0f1e")
         title.pack(pady=15)
 
         input_frame = tk.Frame(root, bg="#0f0f1e")
@@ -235,28 +164,24 @@ class InstagramScraperApp:
         options_frame.pack(pady=10)
 
         self.posts_var = tk.IntVar(value=1)
-        self.followers_var = tk.IntVar(value=0)
-        self.following_var = tk.IntVar(value=0)
         self.save_var = tk.IntVar(value=1)
 
         ttk.Checkbutton(options_frame, text="Get Posts", variable=self.posts_var).pack(side=tk.LEFT, padx=10)
-        ttk.Checkbutton(options_frame, text="Get Followers", variable=self.followers_var).pack(side=tk.LEFT, padx=10)
-        ttk.Checkbutton(options_frame, text="Get Following", variable=self.following_var).pack(side=tk.LEFT, padx=10)
         ttk.Checkbutton(options_frame, text="Save to JSON", variable=self.save_var).pack(side=tk.LEFT, padx=10)
 
         count_frame = tk.Frame(root, bg="#0f0f1e")
         count_frame.pack(pady=5)
 
-        tk.Label(count_frame, text="Max Items:", fg="#FF00AA", bg="#0f0f1e").pack(side=tk.LEFT)
+        tk.Label(count_frame, text="Max Posts:", fg="#FF00AA", bg="#0f0f1e").pack(side=tk.LEFT)
         self.count_entry = ttk.Entry(count_frame, width=5)
         self.count_entry.pack(side=tk.LEFT, padx=5)
-        self.count_entry.insert(0, "20")
+        self.count_entry.insert(0, "12")
 
         self.log_area = scrolledtext.ScrolledText(root, width=100, height=30,
-                                                bg="#111122", fg="#FF00AA",
-                                                font=("Consolas", 10),
-                                                insertbackground="#FF00AA",
-                                                borderwidth=0)
+                                               bg="#111122", fg="#FF00AA",
+                                               font=("Consolas", 10),
+                                               insertbackground="#FF00AA",
+                                               borderwidth=0)
         self.log_area.pack(padx=20, pady=10)
         self.log_area.config(state=tk.DISABLED)
 
@@ -292,7 +217,7 @@ class InstagramScraperApp:
         threading.Thread(target=self.run_scrape, args=(username, max_items), daemon=True).start()
 
     def stop_scrape(self):
-        self.gui_logger("[!] Stop requested, attempting to stop scrape...")
+        self.gui_logger("[!] Stop requested...")
         self.scraper.stop()
         self.stop_button.config(state=tk.DISABLED)
         self.scrape_button.config(state=tk.NORMAL)
@@ -304,7 +229,8 @@ class InstagramScraperApp:
             # Get profile info
             profile_data = self.scraper.get_profile_info(username, self.gui_logger)
             if not profile_data:
-                self.gui_logger("[!] Failed to get profile data")
+                self.gui_logger("[!] Failed to get profile data - Instagram may be blocking requests")
+                self.gui_logger("[!] Try again later or use a VPN/proxy")
                 return
 
             result = {
@@ -335,18 +261,6 @@ class InstagramScraperApp:
                 posts = self.scraper.get_posts(username, max_items, self.gui_logger)
                 result['posts'] = posts
                 self.gui_logger(f"\n[+] Found {len(posts)} posts")
-
-            if self.followers_var.get() and not profile_data['is_private']:
-                self.gui_logger("\n[+] Fetching followers...")
-                followers = self.scraper.get_followers(username, max_items, self.gui_logger)
-                result['followers'] = followers
-                self.gui_logger(f"\n[+] Found {len(followers)} followers")
-
-            if self.following_var.get() and not profile_data['is_private']:
-                self.gui_logger("\n[+] Fetching following...")
-                following = self.scraper.get_following(username, max_items, self.gui_logger)
-                result['following'] = following
-                self.gui_logger(f"\n[+] Found {len(following)} following")
 
             if self.save_var.get():
                 filename = f"instagram_{username}.json"
