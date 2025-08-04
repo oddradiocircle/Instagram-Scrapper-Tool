@@ -7,6 +7,149 @@ import os
 import time
 from datetime import datetime
 
+class IncrementalDataManager:
+    """Gestiona la carga y actualización incremental de datos"""
+    
+    def __init__(self, filename):
+        self.filename = filename
+        self.existing_data = None
+        
+    def load_existing_data(self):
+        """Carga datos existentes del archivo JSON"""
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, 'r', encoding='utf-8') as f:
+                    self.existing_data = json.load(f)
+                    return True
+            except Exception as e:
+                print(f"Error loading existing data: {e}")
+                return False
+        return False
+    
+    def get_existing_post_ids(self):
+        """Obtiene los IDs de posts existentes"""
+        if not self.existing_data:
+            return set()
+        return {post['id'] for post in self.existing_data.get('posts', [])}
+    
+    def get_existing_comment_ids(self, post_id):
+        """Obtiene los IDs de comentarios existentes para un post específico"""
+        if not self.existing_data:
+            return set()
+        
+        for post in self.existing_data.get('posts', []):
+            if post['id'] == post_id:
+                comments = post.get('comments_detailed', [])
+                return {comment['id'] for comment in comments if 'id' in comment}
+        return set()
+    
+    def get_existing_like_usernames(self, post_id):
+        """Obtiene los usernames que ya dieron like a un post"""
+        if not self.existing_data:
+            return set()
+        
+        for post in self.existing_data.get('posts', []):
+            if post['id'] == post_id:
+                likes = post.get('likes_detailed', [])
+                return {like['username'] for like in likes if 'username' in like}
+        return set()
+    
+    def merge_posts_data(self, new_posts):
+        """Combina posts nuevos con existentes de forma inteligente"""
+        if not self.existing_data:
+            return new_posts
+        
+        existing_posts = {post['id']: post for post in self.existing_data.get('posts', [])}
+        merged_posts = []
+        
+        for new_post in new_posts:
+            post_id = new_post['id']
+            
+            if post_id in existing_posts:
+                # Post existe, hacer merge inteligente
+                existing_post = existing_posts[post_id]
+                merged_post = self.merge_single_post(existing_post, new_post)
+                merged_posts.append(merged_post)
+            else:
+                # Post nuevo, agregar directamente
+                merged_posts.append(new_post)
+        
+        # Agregar posts existentes que no estaban en los nuevos
+        for existing_id, existing_post in existing_posts.items():
+            if not any(post['id'] == existing_id for post in new_posts):
+                merged_posts.append(existing_post)
+        
+        return merged_posts
+    
+    def merge_single_post(self, existing_post, new_post):
+        """Combina un post existente con datos nuevos"""
+        merged = existing_post.copy()
+        
+        # Actualizar campos básicos (likes, comentarios pueden haber cambiado)
+        # Siempre usar los valores más recientes para contadores
+        merged.update({
+            'like_count': new_post.get('like_count', existing_post.get('like_count', 0)),
+            'comment_count': new_post.get('comment_count', existing_post.get('comment_count', 0))
+        })
+        
+        # Merge comentarios
+        if 'comments_detailed' in new_post:
+            merged['comments_detailed'] = self.merge_comments(
+                existing_post.get('comments_detailed', []),
+                new_post.get('comments_detailed', [])
+            )
+        
+        # Merge likes
+        if 'likes_detailed' in new_post:
+            merged['likes_detailed'] = self.merge_likes(
+                existing_post.get('likes_detailed', []),
+                new_post.get('likes_detailed', [])
+            )
+        
+        # Agregar timestamp de última actualización
+        merged['last_updated'] = datetime.now().isoformat()
+        
+        return merged
+    
+    def merge_comments(self, existing_comments, new_comments):
+        """Combina comentarios existentes con nuevos"""
+        existing_ids = {comment.get('id') for comment in existing_comments if 'id' in comment}
+        merged_comments = existing_comments.copy()
+        
+        for new_comment in new_comments:
+            if new_comment.get('id') not in existing_ids:
+                merged_comments.append(new_comment)
+        
+        return merged_comments
+    
+    def merge_likes(self, existing_likes, new_likes):
+        """Combina likes existentes con nuevos"""
+        existing_usernames = {like.get('username') for like in existing_likes if 'username' in like}
+        merged_likes = existing_likes.copy()
+        
+        for new_like in new_likes:
+            if new_like.get('username') not in existing_usernames:
+                merged_likes.append(new_like)
+        
+        return merged_likes
+    
+    def save_merged_data(self, profile_data, merged_posts):
+        """Guarda los datos combinados"""
+        result = {
+            'profile': profile_data,
+            'posts': merged_posts,
+            'metadata': {
+                'last_full_scrape': datetime.now().isoformat(),
+                'total_posts': len(merged_posts),
+                'incremental_updates': self.existing_data.get('metadata', {}).get('incremental_updates', 0) + 1 if self.existing_data else 1
+            }
+        }
+        
+        with open(self.filename, 'w', encoding='utf-8') as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+        
+        return result
+
 class InstagramAPI:
     def __init__(self):
         self.session = requests.Session()
@@ -153,6 +296,169 @@ class InstagramAPI:
                 gui_logger(f"[!] Posts error: {str(e)}")
             return posts
 
+    def get_post_comments(self, media_id, count=50, gui_logger=None):
+        """Extrae comentarios detallados de un post específico"""
+        if not self.logged_in:
+            if gui_logger:
+                gui_logger("[!] Not logged in")
+            return []
+
+        try:
+            comments = []
+            next_max_id = None
+            retrieved = 0
+
+            while retrieved < count:
+                time.sleep(self.request_delay)
+                url = f"https://www.instagram.com/api/v1/media/{media_id}/comments/"
+                if next_max_id:
+                    url += f"?max_id={next_max_id}"
+
+                self.headers.update({
+                    'X-CSRFToken': self.csrf_token,
+                    'Referer': f'https://www.instagram.com/'
+                })
+
+                response = self.session.get(url, headers=self.headers)
+                if response.status_code != 200:
+                    if gui_logger:
+                        gui_logger(f"[!] Comments API Error: HTTP {response.status_code}")
+                    break
+
+                data = response.json()
+                for comment in data.get('comments', []):
+                    if retrieved >= count:
+                        break
+
+                    comment_data = {
+                        'id': comment.get('pk'),
+                        'text': comment.get('text'),
+                        'created_at': comment.get('created_at'),
+                        'like_count': comment.get('comment_like_count'),
+                        'user': {
+                            'id': comment.get('user', {}).get('pk'),
+                            'username': comment.get('user', {}).get('username'),
+                            'full_name': comment.get('user', {}).get('full_name'),
+                            'is_verified': comment.get('user', {}).get('is_verified')
+                        },
+                        'replies': []
+                    }
+                    
+                    # Extraer respuestas al comentario si existen
+                    if comment.get('child_comment_count', 0) > 0:
+                        replies = self.get_comment_replies(comment.get('pk'), gui_logger)
+                        comment_data['replies'] = replies
+
+                    comments.append(comment_data)
+                    retrieved += 1
+
+                next_max_id = data.get('next_max_id')
+                if not next_max_id:
+                    break
+
+            return comments
+
+        except Exception as e:
+            if gui_logger:
+                gui_logger(f"[!] Comments error: {str(e)}")
+            return []
+
+    def get_comment_replies(self, comment_id, gui_logger=None):
+        """Extrae respuestas a un comentario específico"""
+        try:
+            time.sleep(self.request_delay)
+            url = f"https://www.instagram.com/api/v1/media/{comment_id}/comments/"
+
+            self.headers.update({
+                'X-CSRFToken': self.csrf_token,
+                'Referer': f'https://www.instagram.com/'
+            })
+
+            response = self.session.get(url, headers=self.headers)
+            if response.status_code != 200:
+                return []
+
+            data = response.json()
+            replies = []
+            
+            for reply in data.get('comments', []):
+                reply_data = {
+                    'id': reply.get('pk'),
+                    'text': reply.get('text'),
+                    'created_at': reply.get('created_at'),
+                    'like_count': reply.get('comment_like_count'),
+                    'user': {
+                        'id': reply.get('user', {}).get('pk'),
+                        'username': reply.get('user', {}).get('username'),
+                        'full_name': reply.get('user', {}).get('full_name'),
+                        'is_verified': reply.get('user', {}).get('is_verified')
+                    }
+                }
+                replies.append(reply_data)
+
+            return replies
+
+        except Exception as e:
+            if gui_logger:
+                gui_logger(f"[!] Replies error: {str(e)}")
+            return []
+
+    def get_post_likes(self, media_id, count=50, gui_logger=None):
+        """Extrae la lista de usuarios que dieron like a un post"""
+        if not self.logged_in:
+            if gui_logger:
+                gui_logger("[!] Not logged in")
+            return []
+
+        try:
+            likes = []
+            next_max_id = None
+            retrieved = 0
+
+            while retrieved < count:
+                time.sleep(self.request_delay)
+                url = f"https://www.instagram.com/api/v1/media/{media_id}/likers/"
+                if next_max_id:
+                    url += f"?max_id={next_max_id}"
+
+                self.headers.update({
+                    'X-CSRFToken': self.csrf_token,
+                    'Referer': f'https://www.instagram.com/'
+                })
+
+                response = self.session.get(url, headers=self.headers)
+                if response.status_code != 200:
+                    if gui_logger:
+                        gui_logger(f"[!] Likes API Error: HTTP {response.status_code}")
+                    break
+
+                data = response.json()
+                for user in data.get('users', []):
+                    if retrieved >= count:
+                        break
+
+                    like_data = {
+                        'user_id': user.get('pk'),
+                        'username': user.get('username'),
+                        'full_name': user.get('full_name'),
+                        'profile_pic_url': user.get('profile_pic_url'),
+                        'is_verified': user.get('is_verified'),
+                        'is_private': user.get('is_private')
+                    }
+                    likes.append(like_data)
+                    retrieved += 1
+
+                next_max_id = data.get('next_max_id')
+                if not next_max_id:
+                    break
+
+            return likes
+
+        except Exception as e:
+            if gui_logger:
+                gui_logger(f"[!] Likes error: {str(e)}")
+            return []
+
 class InstagramScraperApp:
     def __init__(self, root):
         self.root = root
@@ -202,11 +508,45 @@ class InstagramScraperApp:
         options_frame = ttk.LabelFrame(main_frame, text=" Options ", padding=10)
         options_frame.pack(fill=tk.X, pady=5)
 
+        # Primera fila de opciones
+        options_row1 = ttk.Frame(options_frame)
+        options_row1.pack(fill=tk.X, pady=2)
+
         self.save_json = tk.BooleanVar(value=True)
-        ttk.Checkbutton(options_frame, text="Save to JSON", variable=self.save_json).pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(options_row1, text="Save to JSON", variable=self.save_json).pack(side=tk.LEFT, padx=5)
 
         self.save_media = tk.BooleanVar(value=False)
-        ttk.Checkbutton(options_frame, text="Download Media", variable=self.save_media).pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(options_row1, text="Download Media", variable=self.save_media).pack(side=tk.LEFT, padx=5)
+
+        # Segunda fila de opciones - Extracción detallada
+        options_row2 = ttk.Frame(options_frame)
+        options_row2.pack(fill=tk.X, pady=2)
+
+        self.extract_comments = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_row2, text="Extract Comments", variable=self.extract_comments).pack(side=tk.LEFT, padx=5)
+
+        self.extract_likes = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_row2, text="Extract Likes", variable=self.extract_likes).pack(side=tk.LEFT, padx=5)
+
+        self.extract_replies = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_row2, text="Extract Replies", variable=self.extract_replies).pack(side=tk.LEFT, padx=5)
+
+        self.incremental_mode = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_row2, text="Incremental Update", variable=self.incremental_mode).pack(side=tk.LEFT, padx=5)
+
+        # Tercera fila - Límites
+        options_row3 = ttk.Frame(options_frame)
+        options_row3.pack(fill=tk.X, pady=2)
+
+        ttk.Label(options_row3, text="Max Comments/Post:").pack(side=tk.LEFT, padx=5)
+        self.max_comments = ttk.Spinbox(options_row3, from_=10, to=500, width=8)
+        self.max_comments.pack(side=tk.LEFT, padx=5)
+        self.max_comments.set(100)
+
+        ttk.Label(options_row3, text="Max Likes/Post:").pack(side=tk.LEFT, padx=5)
+        self.max_likes = ttk.Spinbox(options_row3, from_=10, to=200, width=8)
+        self.max_likes.pack(side=tk.LEFT, padx=5)
+        self.max_likes.set(50)
 
         # Log Section
         log_frame = ttk.LabelFrame(main_frame, text=" Log ", padding=10)
@@ -289,6 +629,19 @@ class InstagramScraperApp:
     def run_scrape(self, username, max_posts):
         self.log(f"[+] Starting scrape for @{username}")
 
+        # Inicializar gestor de datos incrementales
+        filename = f"instagram_{username}.json"
+        data_manager = IncrementalDataManager(filename)
+        
+        # Cargar datos existentes si el modo incremental está activado
+        if self.incremental_mode.get():
+            if data_manager.load_existing_data():
+                self.log(f"[+] Loaded existing data from {filename}")
+                existing_posts = len(data_manager.existing_data.get('posts', []) if data_manager.existing_data else [])
+                self.log(f"[+] Found {existing_posts} existing posts")
+            else:
+                self.log(f"[+] No existing data found, starting fresh scrape")
+
         try:
             user_info = self.api.get_user_info(username, self.log)
             if not user_info:
@@ -323,15 +676,107 @@ class InstagramScraperApp:
 
             if not user_info.get('is_private'):
                 self.log("\n[+] Fetching posts...")
-                posts = self.api.get_user_posts(user_info['id'], max_posts, self.log)
-                result['posts'] = posts
-                self.log(f"\n[+] Retrieved {len(posts)} posts")
+                new_posts = self.api.get_user_posts(user_info['id'], max_posts, self.log)
+                
+                # Determinar posts nuevos vs existentes
+                if self.incremental_mode.get() and data_manager.existing_data:
+                    existing_post_ids = data_manager.get_existing_post_ids()
+                    truly_new_posts = [post for post in new_posts if post['id'] not in existing_post_ids]
+                    self.log(f"\n[+] Found {len(truly_new_posts)} new posts out of {len(new_posts)} total")
+                else:
+                    truly_new_posts = new_posts
+                    self.log(f"\n[+] Retrieved {len(new_posts)} posts")
+
+                # Extraer detalles adicionales según las opciones seleccionadas
+                if self.extract_comments.get() or self.extract_likes.get():
+                    self.log("\n[+] Fetching post details...")
+                    
+                    # Procesar solo posts nuevos para detalles si es modo incremental
+                    posts_to_process = truly_new_posts if self.incremental_mode.get() and data_manager.existing_data else new_posts
+                    
+                    for i, post in enumerate(posts_to_process):
+                        post_id = post['id']
+                        like_count = post.get('like_count', 0)
+                        self.log(f"[+] Processing post {i+1}/{len(posts_to_process)} - ID: {post_id} - Likes: {like_count}")
+
+                        # Extraer comentarios si está habilitado
+                        if self.extract_comments.get():
+                            max_comments = int(self.max_comments.get())
+                            
+                            # En modo incremental, obtener solo comentarios nuevos
+                            if self.incremental_mode.get() and data_manager.existing_data:
+                                existing_comment_ids = data_manager.get_existing_comment_ids(post_id)
+                                all_comments = self.api.get_post_comments(post_id, max_comments, self.log)
+                                new_comments = [c for c in all_comments if c.get('id') not in existing_comment_ids]
+                                self.log(f"[+] Retrieved {len(new_comments)} new comments (total: {len(all_comments)})")
+                            else:
+                                new_comments = self.api.get_post_comments(post_id, max_comments, self.log)
+                                self.log(f"[+] Retrieved {len(new_comments)} comments")
+                            
+                            post['comments_detailed'] = new_comments
+
+                        # Extraer likes si está habilitado
+                        if self.extract_likes.get():
+                            max_likes = int(self.max_likes.get())
+                            
+                            # En modo incremental, obtener solo likes nuevos
+                            if self.incremental_mode.get() and data_manager.existing_data:
+                                existing_like_usernames = data_manager.get_existing_like_usernames(post_id)
+                                all_likes = self.api.get_post_likes(post_id, max_likes, self.log)
+                                new_likes = [l for l in all_likes if l.get('username') not in existing_like_usernames]
+                                self.log(f"[+] Retrieved {len(new_likes)} new likes (total: {len(all_likes)})")
+                            else:
+                                new_likes = self.api.get_post_likes(post_id, max_likes, self.log)
+                                self.log(f"[+] Retrieved {len(new_likes)} likes")
+                            
+                            post['likes_detailed'] = new_likes
+
+                        # Pequeña pausa entre posts para evitar límites
+                        time.sleep(2)
+                else:
+                    # Mostrar información de likes incluso cuando no se extraen detalles
+                    self.log("\n[+] Posts summary with like counts:")
+                    for i, post in enumerate(new_posts):
+                        like_count = post.get('like_count', 0)
+                        comment_count = post.get('comment_count', 0)
+                        self.log(f"[+] Post {i+1}: ID: {post['id']} - Likes: {like_count} - Comments: {comment_count}")
+
+                # Combinar datos si es modo incremental
+                if self.incremental_mode.get() and data_manager.existing_data:
+                    self.log("\n[+] Merging with existing data...")
+                    final_posts = data_manager.merge_posts_data(new_posts)
+                    self.log(f"[+] Final dataset: {len(final_posts)} posts")
+                else:
+                    final_posts = new_posts
+
+                result['posts'] = final_posts
 
             if self.save_json.get():
-                filename = f"instagram_{username}.json"
-                with open(filename, 'w', encoding='utf-8') as f:
-                    json.dump(result, f, indent=2, ensure_ascii=False)
-                self.log(f"\n[+] Data saved to {filename}")
+                if self.incremental_mode.get():
+                    # Usar el gestor para guardar datos combinados
+                    final_result = data_manager.save_merged_data(result['profile'], result['posts'])
+                    self.log(f"\n[+] Incremental data saved to {filename}")
+                    incremental_count = final_result.get('metadata', {}).get('incremental_updates', 1)
+                    self.log(f"[+] This is incremental update #{incremental_count}")
+                else:
+                    # Guardar normalmente
+                    with open(filename, 'w', encoding='utf-8') as f:
+                        json.dump(result, f, indent=2, ensure_ascii=False)
+                    self.log(f"\n[+] Data saved to {filename}")
+
+            # Mostrar estadísticas finales de likes
+            if result['posts']:
+                total_likes = sum(post.get('like_count', 0) for post in result['posts'])
+                total_comments = sum(post.get('comment_count', 0) for post in result['posts'])
+                avg_likes = total_likes / len(result['posts']) if result['posts'] else 0
+                avg_comments = total_comments / len(result['posts']) if result['posts'] else 0
+                
+                self.log(f"\n[+] === FINAL STATISTICS ===")
+                self.log(f"[+] Total Posts: {len(result['posts'])}")
+                self.log(f"[+] Total Likes: {total_likes:,}")
+                self.log(f"[+] Total Comments: {total_comments:,}")
+                self.log(f"[+] Average Likes per Post: {avg_likes:.1f}")
+                self.log(f"[+] Average Comments per Post: {avg_comments:.1f}")
 
             self.log("\n[+] Scrape completed successfully!")
 
